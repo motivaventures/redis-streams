@@ -12,6 +12,12 @@ const makeMessage = (streamName: string, id: string, payload: unknown) => [
   [streamName, [[id, ['json', JSON.stringify(payload)]]]],
 ]
 
+const makeMessageWithFields = (
+  streamName: string,
+  id: string,
+  fields: string[]
+) => [[streamName, [[id, fields]]]]
+
 const createRedisMock = (): MockRedis => ({
   xgroup: vi.fn().mockResolvedValue('OK'),
   xreadgroup: vi.fn().mockResolvedValue(null),
@@ -184,5 +190,39 @@ describe('RedisStreams defect coverage', () => {
 
     expect(redis.xreadgroup).toHaveBeenCalledTimes(1)
     expect(redis.xreadgroup.mock.calls[0][9]).toBe('0-0')
+  })
+
+  it('should decode payload from json field by key name', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup
+      .mockResolvedValueOnce(
+        makeMessageWithFields('STREAM1', '1-0', [
+          'meta',
+          'not-json',
+          'json',
+          JSON.stringify({ message: 'from-json-field' }),
+        ])
+      )
+      .mockResolvedValueOnce(null)
+
+    const onError = vi.fn()
+    const handler = vi.fn()
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', handler, {
+      subscribeFromStart: true,
+      retryDelayMs: 1,
+      onError,
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(onError).not.toHaveBeenCalled()
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler.mock.calls[0][0].message).toEqual({
+      message: 'from-json-field',
+    })
   })
 })

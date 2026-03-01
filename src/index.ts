@@ -38,10 +38,20 @@ export class RedisStreams {
 
   private async ackMessage(
     streamName: string,
-    consumerName: string,
+    groupName: string,
     messageId: string
   ) {
-    await this.redis.xack(streamName, consumerName, messageId)
+    await this.redis.xack(streamName, groupName, messageId)
+  }
+
+  private parseMessagePayload(rawFields: string[]): unknown {
+    const jsonFieldIndex = rawFields.indexOf('json')
+
+    if (jsonFieldIndex === -1 || jsonFieldIndex + 1 >= rawFields.length) {
+      throw new Error('Missing json field in stream message')
+    }
+
+    return JSON.parse(rawFields[jsonFieldIndex + 1])
   }
 
   subscribe<T>(
@@ -100,7 +110,7 @@ export class RedisStreams {
             groupName,
             consumerName, // @ts-ignore - appears to be error in types, will have to investigate
             'BLOCK',
-            pollOpts?.pollInterval || 60000,
+            state.readPending ? 1 : pollOpts?.pollInterval || 60000,
             'COUNT',
             1,
             'STREAMS',
@@ -120,7 +130,7 @@ export class RedisStreams {
             for (const streams of data) {
               for (const inner of streams[1]) {
                 await handler({
-                  message: JSON.parse(inner[1][1]),
+                  message: this.parseMessagePayload(inner[1]),
                   ack: () => {
                     return this.ackMessage(streamName, groupName, inner[0])
                   },

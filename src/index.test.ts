@@ -1,49 +1,76 @@
 import Redis from 'ioredis'
+import { nanoid } from 'nanoid'
 import { describe, expect, it } from 'vitest'
 import { RedisStreams } from '.'
 
-describe('Redis Streams', () => {
+const describeWithRedis =
+  process.env.REDIS_INTEGRATION === '1' ? describe : describe.skip
+
+describeWithRedis('Redis Streams', () => {
   it('should work', async () => {
     const redis = new Redis()
     const streams = new RedisStreams(redis)
+
+    const streamName = `STREAM_${nanoid()}`
+    const group1 = `GROUP_${nanoid()}`
+    const group2 = `GROUP_${nanoid()}`
+
     await streams.publish(
       {
         message: 'hi',
       },
-      'STREAM1'
+      streamName
     )
     await streams.publish(
       {
         message: 'hi2',
       },
-      'STREAM1'
+      streamName
     )
 
     let count = 0
-    await new Promise<void>((resolve) => {
-      const resolveIfDone = () => {
-        if (count === 4) {
-          resolve()
-        }
-      }
-      streams.subscribe(
-        'STREAM1',
-        'GROUP1',
-        ({ ack }) => {
-          ack()
-          count++
-          resolveIfDone()
-        },
-        {
-          subscribeFromStart: true,
-        }
-      )
-      streams.subscribe('STREAM1', 'GROUP2', ({ ack }) => {
+    const sub1 = streams.subscribe(
+      streamName,
+      group1,
+      ({ ack }) => {
         ack()
         count++
-        resolveIfDone()
-      })
+      },
+      {
+        subscribeFromStart: true,
+      }
+    )
+
+    const sub2 = streams.subscribe(
+      streamName,
+      group2,
+      ({ ack }) => {
+        ack()
+        count++
+      },
+      {
+        subscribeFromStart: true,
+      }
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      const checkDone = () => {
+        if (count === 4) {
+          resolve()
+          return
+        }
+
+        setTimeout(checkDone, 10)
+      }
+
+      setTimeout(checkDone, 10)
+      setTimeout(() => reject(new Error('Did not process all messages in time')), 9000)
     })
+
+    sub1.unsubscribe()
+    sub2.unsubscribe()
+    await redis.quit()
+
     expect(count).toEqual(4)
-  }, 5000)
+  }, 10000)
 })
