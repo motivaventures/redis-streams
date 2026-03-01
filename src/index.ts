@@ -92,7 +92,8 @@ export class RedisStreams {
             }
           }
 
-          const consumerName = pollOpts?.consumerName || nanoid()
+          const consumerName =
+            pollOpts?.consumerName || process.env.HOSTNAME || nanoid()
           const data = (await this.redis.xreadgroup(
             'GROUP',
             groupName,
