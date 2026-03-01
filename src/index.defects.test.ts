@@ -138,6 +138,37 @@ describe('RedisStreams defect coverage', () => {
     expect(redis.xreadgroup).toHaveBeenCalledTimes(2)
   })
 
+  it('should report rejected async handlers through onError', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup
+      .mockResolvedValueOnce(makeMessage('STREAM1', '1-0', { message: 'first' }))
+      .mockResolvedValueOnce(null)
+
+    const onError = vi.fn()
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe(
+      'STREAM1',
+      'GROUP1',
+      async () => {
+        throw new Error('handler failed')
+      },
+      {
+        subscribeFromStart: true,
+        retryDelayMs: 1,
+        onError,
+      }
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onError).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(redis.xreadgroup).toHaveBeenCalledTimes(2)
+  })
+
   it('should recover pending messages before reading new ones', async () => {
     vi.useFakeTimers()
 

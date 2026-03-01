@@ -53,7 +53,7 @@ export class RedisStreams {
     }: {
       message: T
       ack: () => Promise<void>
-    }) => void,
+    }) => void | Promise<void>,
     opts?: SubscribeOpts
   ): Subscription {
     const initialRetryDelay = opts?.retryDelayMs ?? 1000
@@ -113,7 +113,7 @@ export class RedisStreams {
           if (data) {
             for (const streams of data) {
               for (const inner of streams[1]) {
-                handler({
+                await handler({
                   message: JSON.parse(inner[1][1]),
                   ack: () => {
                     return this.ackMessage(streamName, groupName, inner[0])
