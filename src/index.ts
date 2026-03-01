@@ -62,6 +62,7 @@ export class RedisStreams {
     const state = {
       cancelled: false,
       retryDelayMs: initialRetryDelay,
+      readPending: true,
     }
 
     const poll = (pollOpts?: SubscribeOpts, delayMs = 0) => {
@@ -104,11 +105,15 @@ export class RedisStreams {
             1,
             'STREAMS',
             streamName,
-            '>'
+            state.readPending ? '0-0' : '>'
           )) as any[] // TODO: Better typing
 
           if (state.cancelled) {
             return
+          }
+
+          if (state.readPending && !data) {
+            state.readPending = false
           }
 
           if (data) {
