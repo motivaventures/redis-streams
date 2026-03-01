@@ -6,6 +6,13 @@ interface SubscribeOpts {
   subscribeFromStart: boolean
   consumerName?: string
   disableCreateGroup?: boolean
+  retryDelayMs?: number
+  maxRetryDelayMs?: number
+  onError?: (error: Error) => void
+}
+
+interface Subscription {
+  unsubscribe: () => void
 }
 
 export class RedisStreams {
@@ -48,60 +55,110 @@ export class RedisStreams {
       ack: () => Promise<void>
     }) => void,
     opts?: SubscribeOpts
-  ) {
-    setTimeout(async () => {
-      if (!opts?.disableCreateGroup) {
+  ): Subscription {
+    const initialRetryDelay = opts?.retryDelayMs ?? 1000
+    const maxRetryDelay = opts?.maxRetryDelayMs ?? 30000
+
+    const state = {
+      cancelled: false,
+      retryDelayMs: initialRetryDelay,
+    }
+
+    const poll = (pollOpts?: SubscribeOpts, delayMs = 0) => {
+      setTimeout(async () => {
+        if (state.cancelled) {
+          return
+        }
+
+        let nextDelayMs = 0
+
         try {
-          await this.redis.xgroup(
-            'CREATE',
-            streamName,
+          if (!pollOpts?.disableCreateGroup) {
+            try {
+              await this.redis.xgroup(
+                'CREATE',
+                streamName,
+                groupName,
+                pollOpts?.subscribeFromStart ? 0 : '$',
+                'MKSTREAM'
+              )
+            } catch (err) {
+              if (
+                err instanceof Error &&
+                !err.message.toLowerCase().includes('already exists')
+              ) {
+                throw err
+              }
+            }
+          }
+
+          const consumerName = pollOpts?.consumerName || nanoid()
+          const data = (await this.redis.xreadgroup(
+            'GROUP',
             groupName,
-            opts?.subscribeFromStart ? 0 : '$',
-            'MKSTREAM'
+            consumerName, // @ts-ignore - appears to be error in types, will have to investigate
+            'BLOCK',
+            pollOpts?.pollInterval || 60000,
+            'COUNT',
+            1,
+            'STREAMS',
+            streamName,
+            '>'
+          )) as any[] // TODO: Better typing
+
+          if (state.cancelled) {
+            return
+          }
+
+          if (data) {
+            for (const streams of data) {
+              for (const inner of streams[1]) {
+                handler({
+                  message: JSON.parse(inner[1][1]),
+                  ack: () => {
+                    return this.ackMessage(streamName, groupName, inner[0])
+                  },
+                })
+              }
+            }
+          }
+
+          if (state.cancelled) {
+            return
+          }
+
+          state.retryDelayMs = initialRetryDelay
+
+          poll(
+            {
+              subscribeFromStart: false,
+              ...pollOpts,
+              consumerName,
+              disableCreateGroup: true,
+            },
+            nextDelayMs
           )
+          return
         } catch (err) {
-          if (
-            err instanceof Error &&
-            !err.message.toLowerCase().includes('already exists')
-          ) {
-            throw err
-          }
+          const error = err instanceof Error ? err : new Error('Unknown error')
+          pollOpts?.onError?.(error)
+          nextDelayMs = state.retryDelayMs
+          state.retryDelayMs = Math.min(state.retryDelayMs * 2, maxRetryDelay)
         }
-      }
 
-      const consumerName = opts?.consumerName || nanoid()
-      const data = (await this.redis.xreadgroup(
-        'GROUP',
-        groupName,
-        consumerName, // @ts-ignore - appears to be error in types, will have to investigate
-        'BLOCK',
-        opts?.pollInterval || 60000,
-        'COUNT',
-        1,
-        'STREAMS',
-        streamName,
-        '>'
-      )) as any[] // TODO: Better typing
+        poll({
+          ...pollOpts,
+          disableCreateGroup: true,
+        }, nextDelayMs)
+      }, delayMs)
+    }
 
-      if (data) {
-        for (const streams of data) {
-          for (const inner of streams[1]) {
-            handler({
-              message: JSON.parse(inner[1][1]),
-              ack: () => {
-                return this.ackMessage(streamName, groupName, inner[0])
-              },
-            })
-          }
-        }
-      }
+    poll(opts)
 
-      this.subscribe(streamName, groupName, handler, {
-        subscribeFromStart: false,
-        ...opts,
-        consumerName,
-        disableCreateGroup: true,
-      })
-    }, 0)
+    return {
+      unsubscribe: () => {
+        state.cancelled = true
+      },
+    }
   }
 }
