@@ -28,7 +28,11 @@ describe('RedisStreams defect coverage', () => {
   const originalHostname = process.env.HOSTNAME
 
   afterEach(() => {
-    process.env.HOSTNAME = originalHostname
+    if (originalHostname === undefined) {
+      delete process.env.HOSTNAME
+    } else {
+      process.env.HOSTNAME = originalHostname
+    }
     vi.useRealTimers()
     vi.clearAllTimers()
     vi.restoreAllMocks()
@@ -144,6 +148,30 @@ describe('RedisStreams defect coverage', () => {
     expect(redis.xreadgroup).toHaveBeenCalledTimes(2)
   })
 
+  it('should continue polling if onError throws', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup
+      .mockRejectedValueOnce(new Error('temporary redis failure'))
+      .mockResolvedValueOnce(null)
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', () => {}, {
+      subscribeFromStart: true,
+      retryDelayMs: 5,
+      onError: () => {
+        throw new Error('observer failure')
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(redis.xreadgroup).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(5)
+    expect(redis.xreadgroup).toHaveBeenCalledTimes(2)
+  })
+
   it('should report rejected async handlers through onError', async () => {
     vi.useFakeTimers()
 
@@ -184,12 +212,30 @@ describe('RedisStreams defect coverage', () => {
     const streams = new RedisStreams(redis as never)
     streams.subscribe('STREAM1', 'GROUP1', () => {}, {
       subscribeFromStart: true,
+      recoverPending: true,
     })
 
     await vi.advanceTimersByTimeAsync(0)
 
     expect(redis.xreadgroup).toHaveBeenCalledTimes(1)
     expect(redis.xreadgroup.mock.calls[0][9]).toBe('0-0')
+  })
+
+  it('should read new entries when pending recovery is disabled', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup.mockResolvedValue(null)
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', () => {}, {
+      subscribeFromStart: true,
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(redis.xreadgroup).toHaveBeenCalledTimes(1)
+    expect(redis.xreadgroup.mock.calls[0][9]).toBe('>')
   })
 
   it('should decode payload from json field by key name', async () => {
@@ -223,6 +269,44 @@ describe('RedisStreams defect coverage', () => {
     expect(handler).toHaveBeenCalledTimes(1)
     expect(handler.mock.calls[0][0].message).toEqual({
       message: 'from-json-field',
+    })
+  })
+
+  it('should decode payload when fields are buffers', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup
+      .mockResolvedValueOnce([
+        [
+          'STREAM1',
+          [
+            [
+              '1-0',
+              [
+                Buffer.from('meta'),
+                Buffer.from('x'),
+                Buffer.from('json'),
+                Buffer.from(JSON.stringify({ message: 'buffer-payload' })),
+              ],
+            ],
+          ],
+        ],
+      ])
+      .mockResolvedValueOnce(null)
+
+    const handler = vi.fn()
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', handler, {
+      subscribeFromStart: true,
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler.mock.calls[0][0].message).toEqual({
+      message: 'buffer-payload',
     })
   })
 })

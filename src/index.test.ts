@@ -32,8 +32,8 @@ describeWithRedis('Redis Streams', () => {
     const sub1 = streams.subscribe(
       streamName,
       group1,
-      ({ ack }) => {
-        ack()
+      async ({ ack }) => {
+        await ack()
         count++
       },
       {
@@ -44,8 +44,8 @@ describeWithRedis('Redis Streams', () => {
     const sub2 = streams.subscribe(
       streamName,
       group2,
-      ({ ack }) => {
-        ack()
+      async ({ ack }) => {
+        await ack()
         count++
       },
       {
@@ -53,24 +53,29 @@ describeWithRedis('Redis Streams', () => {
       }
     )
 
-    await new Promise<void>((resolve, reject) => {
-      const checkDone = () => {
-        if (count === 4) {
-          resolve()
-          return
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const checkDone = () => {
+          if (count === 4) {
+            resolve()
+            return
+          }
+
+          setTimeout(checkDone, 10)
         }
 
         setTimeout(checkDone, 10)
-      }
+        setTimeout(
+          () => reject(new Error('Did not process all messages in time')),
+          9000
+        )
+      })
 
-      setTimeout(checkDone, 10)
-      setTimeout(() => reject(new Error('Did not process all messages in time')), 9000)
-    })
-
-    sub1.unsubscribe()
-    sub2.unsubscribe()
-    await redis.quit()
-
-    expect(count).toEqual(4)
+      expect(count).toEqual(4)
+    } finally {
+      sub1.unsubscribe()
+      sub2.unsubscribe()
+      await redis.quit()
+    }
   }, 10000)
 })

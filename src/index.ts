@@ -5,7 +5,7 @@ interface SubscribeOpts {
   pollInterval?: number
   subscribeFromStart: boolean
   consumerName?: string
-  disableCreateGroup?: boolean
+  recoverPending?: boolean
   retryDelayMs?: number
   maxRetryDelayMs?: number
   onError?: (error: Error) => void
@@ -44,14 +44,31 @@ export class RedisStreams {
     await this.redis.xack(streamName, groupName, messageId)
   }
 
-  private parseMessagePayload(rawFields: string[]): unknown {
-    const jsonFieldIndex = rawFields.indexOf('json')
+  private parseMessagePayload(rawFields: Array<string | Buffer>): unknown {
+    const asString = (value: string | Buffer): string => {
+      return typeof value === 'string' ? value : value.toString('utf8')
+    }
 
-    if (jsonFieldIndex === -1 || jsonFieldIndex + 1 >= rawFields.length) {
+    let jsonValue: string | null = null
+    for (let i = 0; i < rawFields.length; i += 2) {
+      const key = rawFields[i]
+      const value = rawFields[i + 1]
+
+      if (key === undefined || value === undefined) {
+        continue
+      }
+
+      if (asString(key) === 'json') {
+        jsonValue = asString(value)
+        break
+      }
+    }
+
+    if (jsonValue === null) {
       throw new Error('Missing json field in stream message')
     }
 
-    return JSON.parse(rawFields[jsonFieldIndex + 1])
+    return JSON.parse(jsonValue)
   }
 
   subscribe<T>(
@@ -68,14 +85,29 @@ export class RedisStreams {
   ): Subscription {
     const initialRetryDelay = opts?.retryDelayMs ?? 1000
     const maxRetryDelay = opts?.maxRetryDelayMs ?? 30000
+    const consumerName = opts?.consumerName || process.env.HOSTNAME || nanoid()
 
     const state = {
       cancelled: false,
       retryDelayMs: initialRetryDelay,
-      readPending: true,
+      readPending: opts?.recoverPending ?? false,
+      groupReady: false,
     }
 
-    const poll = (pollOpts?: SubscribeOpts, delayMs = 0) => {
+    const safeOnError = (error: Error) => {
+      try {
+        opts?.onError?.(error)
+      } catch (_ignored) {
+        // Intentionally ignore observer callback failures.
+      }
+    }
+
+    const isGroupAlreadyExistsError = (error: Error): boolean => {
+      const message = error.message.toLowerCase()
+      return message.includes('busygroup') || message.includes('already exists')
+    }
+
+    const poll = (delayMs = 0) => {
       setTimeout(async () => {
         if (state.cancelled) {
           return
@@ -84,33 +116,31 @@ export class RedisStreams {
         let nextDelayMs = 0
 
         try {
-          if (!pollOpts?.disableCreateGroup) {
+          if (!state.groupReady) {
             try {
               await this.redis.xgroup(
                 'CREATE',
                 streamName,
                 groupName,
-                pollOpts?.subscribeFromStart ? 0 : '$',
+                opts?.subscribeFromStart ? 0 : '$',
                 'MKSTREAM'
               )
+              state.groupReady = true
             } catch (err) {
-              if (
-                err instanceof Error &&
-                !err.message.toLowerCase().includes('already exists')
-              ) {
+              if (err instanceof Error && !isGroupAlreadyExistsError(err)) {
                 throw err
               }
+
+              state.groupReady = true
             }
           }
 
-          const consumerName =
-            pollOpts?.consumerName || process.env.HOSTNAME || nanoid()
           const data = (await this.redis.xreadgroup(
             'GROUP',
             groupName,
             consumerName, // @ts-ignore - appears to be error in types, will have to investigate
             'BLOCK',
-            state.readPending ? 1 : pollOpts?.pollInterval || 60000,
+            state.readPending ? 1 : opts?.pollInterval || 60000,
             'COUNT',
             1,
             'STREAMS',
@@ -144,32 +174,20 @@ export class RedisStreams {
           }
 
           state.retryDelayMs = initialRetryDelay
-
-          poll(
-            {
-              subscribeFromStart: false,
-              ...pollOpts,
-              consumerName,
-              disableCreateGroup: true,
-            },
-            nextDelayMs
-          )
+          poll(nextDelayMs)
           return
         } catch (err) {
           const error = err instanceof Error ? err : new Error('Unknown error')
-          pollOpts?.onError?.(error)
+          safeOnError(error)
           nextDelayMs = state.retryDelayMs
           state.retryDelayMs = Math.min(state.retryDelayMs * 2, maxRetryDelay)
         }
 
-        poll({
-          ...pollOpts,
-          disableCreateGroup: true,
-        }, nextDelayMs)
+        poll(nextDelayMs)
       }, delayMs)
     }
 
-    poll(opts)
+    poll()
 
     return {
       unsubscribe: () => {
