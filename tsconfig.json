@@ -9,5 +9,6 @@
     "outDir": "./dist"
   },
   "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts"],
   "esModuleInterop": true
 }

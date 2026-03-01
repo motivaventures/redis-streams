@@ -1,14 +1,29 @@
 {
-  "name": "@byudaniel/redis-streams",
-  "version": "0.2.2",
+  "name": "@motivaventures/redis-streams",
+  "version": "0.2.3",
   "description": "",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
-    "prepublish": "npm run build",
+    "prepublishOnly": "npm run build",
     "start": "tsc && node dist/index.js",
     "test": "jest"
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motivaventures/redis-streams.git"
+  },
+  "bugs": {
+    "url": "https://github.com/motivaventures/redis-streams/issues"
+  },
+  "homepage": "https://github.com/motivaventures/redis-streams#readme",
   "peerDependencies": {
     "ioredis": "5.x"
   },
