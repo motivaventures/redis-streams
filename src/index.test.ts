@@ -1,4 +1,5 @@
 import Redis from 'ioredis'
+import { describe, expect, it } from 'vitest'
 import { RedisStreams } from '.'
 
 describe('Redis Streams', () => {
