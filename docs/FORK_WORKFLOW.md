@@ -64,8 +64,19 @@ gh pr create --repo byudaniel/redis-streams --base master --head motivaventures:
 ## Release Fork Package
 
 ```bash
-npm version patch
-git push origin master --follow-tags
+git checkout master
+git pull --ff-only origin master
+git push origin master
 ```
 
-Publishing is handled by the GitHub Actions workflow on tag push (`v*`) or manual dispatch.
+Publishing is handled by semantic-release in GitHub Actions.
+
+- Trigger: push to `master` (or manual dispatch).
+- Semantic versioning: inferred from Conventional Commit messages.
+- Outputs: Git tag (`v*`), GitHub release notes, updated `CHANGELOG.md`, and package publish to GitHub Packages.
+
+Commit message guidance for release automation:
+
+- `fix: ...` -> patch release
+- `feat: ...` -> minor release
+- `feat!: ...` or `BREAKING CHANGE:` -> major release

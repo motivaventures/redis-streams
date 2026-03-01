@@ -12,7 +12,7 @@ This repository is a maintained fork of `byudaniel/redis-streams`.
 
 - Package name/scope is `@motivaventures/redis-streams`.
 - Publishing targets GitHub Packages for the `motivaventures` org.
-- CI publish workflow exists for tag-based/manual publishing.
+- CI uses semantic-release to version, tag, release, and publish from `master`.
 
 ## Branch Roles
 
