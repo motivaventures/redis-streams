@@ -5,6 +5,7 @@ import { RedisStreams } from '.'
 type MockRedis = {
   xgroup: ReturnType<typeof vi.fn>
   xreadgroup: ReturnType<typeof vi.fn>
+  xautoclaim: ReturnType<typeof vi.fn>
   xack: ReturnType<typeof vi.fn>
 }
 
@@ -21,8 +22,15 @@ const makeMessageWithFields = (
 const createRedisMock = (): MockRedis => ({
   xgroup: vi.fn().mockResolvedValue('OK'),
   xreadgroup: vi.fn().mockResolvedValue(null),
+  xautoclaim: vi.fn().mockResolvedValue(['0-0', []]),
   xack: vi.fn().mockResolvedValue(1),
 })
+
+const flushPollTicks = async (count = 3) => {
+  for (let i = 0; i < count; i += 1) {
+    await vi.advanceTimersByTimeAsync(1)
+  }
+}
 
 describe('RedisStreams defect coverage', () => {
   const originalHostname = process.env.HOSTNAME
@@ -93,8 +101,7 @@ describe('RedisStreams defect coverage', () => {
       { subscribeFromStart: true }
     )
 
-    await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(0)
+    await flushPollTicks()
     await vi.advanceTimersByTimeAsync(0)
 
     expect(redis.xreadgroup).toHaveBeenCalledTimes(1)
@@ -236,6 +243,82 @@ describe('RedisStreams defect coverage', () => {
 
     expect(redis.xreadgroup).toHaveBeenCalledTimes(1)
     expect(redis.xreadgroup.mock.calls[0][9]).toBe('>')
+  })
+
+  it('should transition to reclaim mode when enabled after own pending drain', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup.mockResolvedValue(null)
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', () => {}, {
+      subscribeFromStart: true,
+      recoverPending: true,
+      reclaimPendingFromOtherConsumers: true,
+    })
+
+    await flushPollTicks()
+
+    expect(redis.xreadgroup.mock.calls.length).toBeGreaterThanOrEqual(1)
+    expect(redis.xreadgroup.mock.calls[0][9]).toBe('0-0')
+
+    expect(redis.xautoclaim.mock.calls.length).toBeGreaterThanOrEqual(1)
+    expect(redis.xautoclaim.mock.calls[0][4]).toBe('0-0')
+    expect(redis.xautoclaim.mock.calls[0][6]).toBe(20)
+    expect(redis.xautoclaim.mock.calls[0][3]).toBe(1000)
+  })
+
+  it('should use configured reclaim idle threshold for xautoclaim', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup.mockResolvedValue(null)
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', () => {}, {
+      subscribeFromStart: true,
+      recoverPending: true,
+      reclaimPendingFromOtherConsumers: true,
+      reclaimMinIdleTimeMs: 250,
+      reclaimBatchSize: 5,
+    })
+
+    await flushPollTicks()
+
+    expect(redis.xautoclaim).toHaveBeenCalledTimes(1)
+    expect(redis.xautoclaim.mock.calls[0][3]).toBe(250)
+    expect(redis.xautoclaim.mock.calls[0][6]).toBe(5)
+  })
+
+  it('should process reclaimed messages and ack them', async () => {
+    vi.useFakeTimers()
+
+    const redis = createRedisMock()
+    redis.xreadgroup.mockResolvedValue(null)
+    redis.xautoclaim
+      .mockResolvedValueOnce([
+        '0-0',
+        [['2-0', ['json', JSON.stringify({ message: 'reclaimed' })]]],
+      ])
+      .mockResolvedValueOnce(['0-0', []])
+
+    const handler = vi.fn(async ({ ack }: { ack: () => Promise<void> }) => {
+      await ack()
+    })
+
+    const streams = new RedisStreams(redis as never)
+    streams.subscribe('STREAM1', 'GROUP1', handler, {
+      subscribeFromStart: true,
+      recoverPending: true,
+      reclaimPendingFromOtherConsumers: true,
+    })
+
+    await flushPollTicks()
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler.mock.calls[0][0].message).toEqual({ message: 'reclaimed' })
+    expect(redis.xack).toHaveBeenCalledWith('STREAM1', 'GROUP1', '2-0')
   })
 
   it('should decode payload from json field by key name', async () => {

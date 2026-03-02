@@ -6,6 +6,9 @@ interface SubscribeOpts {
   subscribeFromStart: boolean
   consumerName?: string
   recoverPending?: boolean
+  reclaimPendingFromOtherConsumers?: boolean
+  reclaimMinIdleTimeMs?: number
+  reclaimBatchSize?: number
   retryDelayMs?: number
   maxRetryDelayMs?: number
   onError?: (error: Error) => void
@@ -14,6 +17,8 @@ interface SubscribeOpts {
 interface Subscription {
   unsubscribe: () => void
 }
+
+type SubscriberMode = 'pending' | 'reclaim' | 'tail'
 
 export class RedisStreams {
   constructor(private redis: Redis) {}
@@ -44,7 +49,7 @@ export class RedisStreams {
     await this.redis.xack(streamName, groupName, messageId)
   }
 
-  private parseMessagePayload(rawFields: Array<string | Buffer>): unknown {
+  private parseMessagePayload<T>(rawFields: Array<string | Buffer>): T {
     const asString = (value: string | Buffer): string => {
       return typeof value === 'string' ? value : value.toString('utf8')
     }
@@ -68,7 +73,7 @@ export class RedisStreams {
       throw new Error('Missing json field in stream message')
     }
 
-    return JSON.parse(jsonValue)
+    return JSON.parse(jsonValue) as T
   }
 
   subscribe<T>(
@@ -85,13 +90,16 @@ export class RedisStreams {
   ): Subscription {
     const initialRetryDelay = opts?.retryDelayMs ?? 1000
     const maxRetryDelay = opts?.maxRetryDelayMs ?? 30000
+    const reclaimMinIdleTimeMs = opts?.reclaimMinIdleTimeMs ?? 1000
+    const reclaimBatchSize = opts?.reclaimBatchSize ?? 20
     const consumerName = opts?.consumerName || process.env.HOSTNAME || nanoid()
 
     const state = {
       cancelled: false,
       retryDelayMs: initialRetryDelay,
-      readPending: opts?.recoverPending ?? false,
+      mode: ((opts?.recoverPending ?? false) ? 'pending' : 'tail') as SubscriberMode,
       groupReady: false,
+      reclaimCursor: '0-0',
     }
 
     const safeOnError = (error: Error) => {
@@ -135,32 +143,69 @@ export class RedisStreams {
             }
           }
 
-          const data = (await this.redis.xreadgroup(
-            'GROUP',
-            groupName,
-            consumerName, // @ts-ignore - appears to be error in types, will have to investigate
-            'BLOCK',
-            state.readPending ? 1 : opts?.pollInterval || 60000,
-            'COUNT',
-            1,
-            'STREAMS',
-            streamName,
-            state.readPending ? '0-0' : '>'
-          )) as any[] // TODO: Better typing
+          let data: any[] | null = null // TODO: Better typing
+          const hasMessages = (rows: any[] | null): boolean => {
+            if (!Array.isArray(rows) || rows.length === 0) {
+              return false
+            }
+
+            return rows.some((row) => Array.isArray(row?.[1]) && row[1].length > 0)
+          }
+
+          if (state.mode === 'reclaim') {
+            const reclaimResult = (await (this.redis as any).xautoclaim(
+              streamName,
+              groupName,
+              consumerName,
+              reclaimMinIdleTimeMs,
+              state.reclaimCursor,
+              'COUNT',
+              reclaimBatchSize
+            )) as [string, Array<[string, Array<string | Buffer>]>]
+
+            const nextCursor = reclaimResult?.[0] || '0-0'
+            const reclaimedMessages = reclaimResult?.[1] || []
+
+            state.reclaimCursor = nextCursor
+
+            if (reclaimedMessages.length > 0) {
+              data = [[streamName, reclaimedMessages]]
+            }
+
+            if (nextCursor === '0-0' && reclaimedMessages.length === 0) {
+              state.mode = 'tail'
+            }
+          } else {
+            data = (await this.redis.xreadgroup(
+              'GROUP',
+              groupName,
+              consumerName, // @ts-ignore - appears to be error in types, will have to investigate
+              'BLOCK',
+              state.mode === 'pending' ? 1 : opts?.pollInterval || 60000,
+              'COUNT',
+              1,
+              'STREAMS',
+              streamName,
+              state.mode === 'pending' ? '0-0' : '>'
+            )) as any[] // TODO: Better typing
+
+            if (state.mode === 'pending' && !hasMessages(data)) {
+              state.mode = opts?.reclaimPendingFromOtherConsumers
+                ? 'reclaim'
+                : 'tail'
+            }
+          }
 
           if (state.cancelled) {
             return
           }
 
-          if (state.readPending && !data) {
-            state.readPending = false
-          }
-
-          if (data) {
-            for (const streams of data) {
+          if (hasMessages(data)) {
+            const messageRows = data || []
+            for (const streams of messageRows) {
               for (const inner of streams[1]) {
                 await handler({
-                  message: this.parseMessagePayload(inner[1]),
+                  message: this.parseMessagePayload<T>(inner[1]),
                   ack: () => {
                     return this.ackMessage(streamName, groupName, inner[0])
                   },

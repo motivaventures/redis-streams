@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "examples:harness": "ts-node examples/redis-streams-harness.ts",
     "prepublishOnly": "pnpm run build",
     "release:dry-run": "semantic-release --dry-run",
     "test": "vitest run"
