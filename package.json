@@ -1,6 +1,6 @@
 {
   "name": "@motivaventures/redis-streams",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "",
   "packageManager": "pnpm@10.18.2",
   "main": "dist/index.js",
